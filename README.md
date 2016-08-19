@@ -4,6 +4,12 @@
 
 **slackauth** is a package to implement the ["Add to Slack"](https://api.slack.com/docs/slack-button) button functionality in an easy way.
 
+## Install
+
+```
+go get gopkg.in/mvader/slackauth.v1
+```
+
 ## Example
 
 ```go
