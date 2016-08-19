@@ -15,8 +15,8 @@ import (
 	log15 "gopkg.in/inconshreveable/log15.v2"
 )
 
-// SlackAuth is a service to authenticate on slack using the "Add to slack" button.
-type SlackAuth interface {
+// Service is a service to authenticate on slack using the "Add to slack" button.
+type Service interface {
 	// SetLogOutput sets the place where logs will be written.
 	SetLogOutput(io.Writer)
 
@@ -67,8 +67,8 @@ type Options struct {
 	KeyFile      string
 }
 
-// New creates a new SlackAuth service.
-func New(opts Options) (SlackAuth, error) {
+// New creates a new slackauth service.
+func New(opts Options) (Service, error) {
 	if opts.Addr == "" || opts.ClientID == "" || opts.ClientSecret == "" {
 		return nil, errors.New("slackauth: addr, client id and client secret can not be empty")
 	}
