@@ -57,13 +57,25 @@ type slackAuth struct {
 
 // Options has all the configurable parameters for slack authenticator.
 type Options struct {
+	// Addr is the address where the service will run. e.g: :8080, 0.0.0.0:8989, etc.
 	Addr         string
+	// ClientID is the slack client ID provided to you in your app credentials.
 	ClientID     string
+	// ClientSecret is the slack client secret provided to you in your app credentials.
 	ClientSecret string
+	// SuccessTpl is the path to the template that will be displayed when there is a successful
+	// auth.
 	SuccessTpl   string
+	// ErrorTpl is the path to the template that will be displayed when there is an invalid
+	// auth.
 	ErrorTpl     string
+	// Debug will print some debug logs.
 	Debug        bool
+	// CertFile is the path to the SSL certificate file. If this and KeyFile are provided, the
+	// server will be run with SSL.
 	CertFile     string
+	// KeyFile is the path to the SSL certificate key file. If this and CertFile are provided, the
+	// server will be run with SSL.
 	KeyFile      string
 }
 
@@ -108,6 +120,7 @@ func (s *slackAuth) Run() error {
 		}
 	}()
 
+	log15.Info("Starting server", "addr", s.addr)
 	return s.runServer()
 }
 
@@ -160,7 +173,8 @@ func (s *slackAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := s.successTpl.Execute(w, resp); err != nil {
 		log15.Error("error displaying success tpl", "err", err.Error())
 	}
-
+	
+	log15.Debug("successful authorization", "team", resp.TeamName, "team id", resp.TeamID)
 	s.auths <- resp
 }
 
