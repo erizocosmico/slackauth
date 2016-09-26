@@ -26,6 +26,9 @@ type Service interface {
 	// OnAuth sets the handler that will be triggered every time someone authorizes slack
 	// successfully.
 	OnAuth(func(*slack.OAuthResponse))
+
+	//ConfigureSlackButton configures the Slack Button
+	ConfigureSlackButton(options *SlackButtonOptions) error
 }
 
 type slackAPI interface {
@@ -53,6 +56,7 @@ type slackAuth struct {
 	auths        chan *slack.OAuthResponse
 	callback     func(*slack.OAuthResponse)
 	api          slackAPI
+	httpHandlers map[string]HTTPHandler
 }
 
 // Options has all the configurable parameters for slack authenticator.
@@ -95,7 +99,7 @@ func New(opts Options) (Service, error) {
 		return nil, err
 	}
 
-	return &slackAuth{
+	slackAuthService := &slackAuth{
 		clientID:     opts.ClientID,
 		clientSecret: opts.ClientSecret,
 		addr:         opts.Addr,
@@ -106,7 +110,11 @@ func New(opts Options) (Service, error) {
 		keyFile:      opts.KeyFile,
 		auths:        make(chan *slack.OAuthResponse, 1),
 		api:          &slackAPIWrapper{},
-	}, nil
+		httpHandlers: make(map[string]HTTPHandler),
+	}
+	slackAuthService.httpHandlers["/auth"] = slackAuthService.getAuthorizationHandler()
+
+	return slackAuthService, nil
 }
 
 func (s *slackAuth) Run() error {
@@ -145,6 +153,16 @@ func (s *slackAuth) OnAuth(fn func(*slack.OAuthResponse)) {
 	s.callback = fn
 }
 
+func (s *slackAuth) ConfigureSlackButton(options *SlackButtonOptions) error {
+	options.ClientID = s.clientID
+	handler, err := GetButtonHandler(options)
+	if err != nil {
+		return err
+	}
+	s.httpHandlers["/"] = handler
+	return nil
+}
+
 func (s *slackAuth) runServer() error {
 	srv := &http.Server{
 		ReadTimeout:  1 * time.Second,
@@ -160,22 +178,41 @@ func (s *slackAuth) runServer() error {
 }
 
 func (s *slackAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	code := r.FormValue("code")
-	resp, err := s.api.GetOAuthResponse(s.clientID, s.clientSecret, code, s.debug)
-	if err != nil {
-		log15.Error("error getting oauth response", "err", err.Error())
-		if err := s.errorTpl.Execute(w, resp); err != nil {
-			log15.Error("error displaying error tpl", "err", err.Error())
-		}
+	path := getPath(r)
+	if isIgnoredUri(path) {
 		return
 	}
 
-	if err := s.successTpl.Execute(w, resp); err != nil {
-		log15.Error("error displaying success tpl", "err", err.Error())
+	log15.Info("requested: " + path)
+	handler, ok := s.httpHandlers[path]
+	if !ok {
+		w.WriteHeader(404)
+		log15.Error("no handler found", "err", path)
+		return
 	}
-	
-	log15.Debug("successful authorization", "team", resp.TeamName, "team id", resp.TeamID)
-	s.auths <- resp
+	handler(w, r)
+}
+
+func (s *slackAuth) getAuthorizationHandler() func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		code := r.FormValue("code")
+		resp, err := s.api.GetOAuthResponse(s.clientID, s.clientSecret, code, s.debug)
+		if err != nil {
+			w.WriteHeader(409)
+			log15.Error("error getting oauth response", "err", err.Error())
+			if err := s.errorTpl.Execute(w, resp); err != nil {
+				log15.Error("error displaying error tpl", "err", err.Error())
+			}
+			return
+		}
+
+		if err := s.successTpl.Execute(w, resp); err != nil {
+			log15.Error("error displaying success tpl", "err", err.Error())
+		}
+
+		log15.Debug("successful authorization", "team", resp.TeamName, "team id", resp.TeamID)
+		s.auths <- resp
+	}
 }
 
 func readTemplate(file string) (*template.Template, error) {
@@ -185,4 +222,12 @@ func readTemplate(file string) (*template.Template, error) {
 	}
 
 	return template.New("").Parse(string(bytes))
+}
+
+func getPath(r *http.Request) string {
+	return r.URL.Path
+}
+
+func isIgnoredUri(uri string) bool {
+	return uri == "/favicon.ico"
 }
