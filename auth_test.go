@@ -48,6 +48,8 @@ func TestNew(t *testing.T) {
 			ClientSecret: "bar",
 			SuccessTpl:   "invalid.txt",
 			ErrorTpl:     "bar.txt",
+			ButtonTpl:    "invalid.txt",
+			Scopes:       []string{},
 		}, true},
 		{Options{
 			Addr:         ":8080",
@@ -55,6 +57,8 @@ func TestNew(t *testing.T) {
 			ClientSecret: "bar",
 			SuccessTpl:   "valid.txt",
 			ErrorTpl:     "invalid.txt",
+			ButtonTpl:    "invalid.txt",
+			Scopes:       []string{},
 		}, true},
 		{Options{
 			Addr:         ":8080",
@@ -62,15 +66,36 @@ func TestNew(t *testing.T) {
 			ClientSecret: "bar",
 			SuccessTpl:   "valid.txt",
 			ErrorTpl:     "valid.txt",
+			ButtonTpl:    "invalid.txt",
+			Scopes:       []string{},
+		}, true},
+		{Options{
+			Addr:         ":8080",
+			ClientID:     "foo",
+			ClientSecret: "bar",
+			SuccessTpl:   "valid.txt",
+			ErrorTpl:     "valid.txt",
+			ButtonTpl:    "valid.txt",
+			Scopes:       []string{},
+		}, true},
+		{Options{
+			Addr:         ":8080",
+			ClientID:     "foo",
+			ClientSecret: "bar",
+			SuccessTpl:   "valid.txt",
+			ErrorTpl:     "valid.txt",
+			ButtonTpl:    "valid.txt",
+			Scopes:       []string{BOT},
 		}, false},
 	}
 
-	for _, c := range cases {
+	for i, c := range cases {
 		_, err := New(c.options)
+		errorHint := fmt.Sprintf("fail in testcase #%d %#v", i, c.options)
 		if c.err {
-			assert.NotNil(t, err)
+			assert.NotNil(t, err, errorHint)
 		} else {
-			assert.Nil(t, err)
+			assert.Nil(t, err, errorHint)
 		}
 	}
 
@@ -111,7 +136,7 @@ func TestSlackAuth(t *testing.T) {
 }
 
 func testRequest(t *testing.T, code string, expected string) {
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:8989/?code=%s", code))
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:8989/auth?code=%s", code))
 	assert.Nil(t, err)
 	bytes, err := ioutil.ReadAll(resp.Body)
 	assert.Nil(t, err)

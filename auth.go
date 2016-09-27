@@ -107,6 +107,11 @@ func New(opts Options) (Service, error) {
 		return nil, err
 	}
 
+	if len(opts.Scopes) == 0 {
+		return nil, errors.New("At least one error needed")
+	}
+	scopes := strings.Join(opts.Scopes, ",")
+
 	return &slackAuth{
 		clientID:     opts.ClientID,
 		clientSecret: opts.ClientSecret,
@@ -119,7 +124,7 @@ func New(opts Options) (Service, error) {
 		auths:        make(chan *slack.OAuthResponse, 1),
 		api:          &slackAPIWrapper{},
 		buttonTpl:    buttonTpl,
-		scopes:       strings.Join(opts.Scopes, ","),
+		scopes:       scopes,
 	}, nil
 }
 
