@@ -108,7 +108,7 @@ func New(opts Options) (Service, error) {
 	}
 
 	if len(opts.Scopes) == 0 {
-		return nil, errors.New("At least one error needed")
+		return nil, errors.New("At least one scope needed")
 	}
 	scopes := strings.Join(opts.Scopes, ",")
 

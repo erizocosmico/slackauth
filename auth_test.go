@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"regexp"
 	"testing"
 	"time"
 
@@ -123,22 +124,68 @@ func TestSlackAuth(t *testing.T) {
 	<-time.After(50 * time.Millisecond)
 
 	// This will not trigger an OnAuth event
-	testRequest(t, "fooo", tplSuccess)
-	testRequest(t, "invalid", tplError)
+	testRequest(t, getUrlForAuth("fooo"), tplSuccess)
+	testRequest(t, getUrlForAuth("invalid"), tplError)
 
 	var auths int
 	auth.OnAuth(func(auth *slack.OAuthResponse) {
 		auths++
 	})
-	testRequest(t, "fooo", tplSuccess)
-	testRequest(t, "bar", tplSuccess)
+	testRequest(t, getUrlForAuth("fooo"), tplSuccess)
+	testRequest(t, getUrlForAuth("bar"), tplSuccess)
 	assert.Equal(t, 2, auths)
 }
 
-func testRequest(t *testing.T, code string, expected string) {
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:8989/auth?code=%s", code))
+func getUrlForAuth(code string) string {
+	return fmt.Sprintf("http://127.0.0.1:8989/auth?code=%s", code)
+}
+
+func testRequest(t *testing.T, url string, expected string) {
+	assert.Equal(t, expected, string(getBody(t, url)))
+}
+
+func getBody(t *testing.T, url string) []byte {
+	resp, err := http.Get(url)
 	assert.Nil(t, err)
 	bytes, err := ioutil.ReadAll(resp.Body)
 	assert.Nil(t, err)
-	assert.Equal(t, expected, string(bytes))
+	return bytes
+}
+
+type buttonOptions struct {
+	Scopes   []string
+	ClientId string
+}
+
+func TestSlackButton(t *testing.T) {
+	buttonOpts := buttonOptions{
+		Scopes:   []string{BOT, COMMANDS},
+		ClientId: "client-id",
+	}
+
+	buttonTplString := `ADD ME:
+		<a href="https://slack.com/oauth/authorize?scope={{.Scopes}}&client_id={{.ClientId}}">
+			SLACK BUTTON
+		</a>`
+
+	assert.Nil(t, ioutil.WriteFile("valid.txt", []byte(buttonTplString), 0777))
+
+	auth, err := New(Options{
+		Addr:         ":8080",
+		ClientID:     buttonOpts.ClientId,
+		ClientSecret: "bar",
+		SuccessTpl:   "valid.txt",
+		ErrorTpl:     "valid.txt",
+		ButtonTpl:    "valid.txt",
+		Scopes:       buttonOpts.Scopes,
+	})
+	assert.Nil(t, err)
+
+	go auth.Run()
+	<-time.After(5 * time.Millisecond)
+
+	matcher, _ := regexp.Compile("<a[^>]+href=\"https://slack.com/oauth/authorize\\?scope=[^&\"]+&client_id=[^&\"]+\"[^>]*>[\\s\\S]*</a>")
+	servedButtonCode := getBody(t, "http://127.0.0.1:8080/")
+	found := matcher.Find(servedButtonCode)
+	assert.NotNil(t, found)
 }
