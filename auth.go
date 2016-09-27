@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nlopes/slack"
@@ -26,9 +27,6 @@ type Service interface {
 	// OnAuth sets the handler that will be triggered every time someone authorizes slack
 	// successfully.
 	OnAuth(func(*slack.OAuthResponse))
-
-	//ConfigureSlackButton configures the Slack Button
-	ConfigureSlackButton(options *SlackButtonOptions) error
 }
 
 type slackAPI interface {
@@ -56,31 +54,36 @@ type slackAuth struct {
 	auths        chan *slack.OAuthResponse
 	callback     func(*slack.OAuthResponse)
 	api          slackAPI
-	httpHandlers map[string]HTTPHandler
+	buttonTpl    *template.Template
+	scopes       string
 }
 
 // Options has all the configurable parameters for slack authenticator.
 type Options struct {
 	// Addr is the address where the service will run. e.g: :8080, 0.0.0.0:8989, etc.
-	Addr         string
+	Addr string
 	// ClientID is the slack client ID provided to you in your app credentials.
-	ClientID     string
+	ClientID string
 	// ClientSecret is the slack client secret provided to you in your app credentials.
 	ClientSecret string
 	// SuccessTpl is the path to the template that will be displayed when there is a successful
 	// auth.
-	SuccessTpl   string
+	SuccessTpl string
 	// ErrorTpl is the path to the template that will be displayed when there is an invalid
 	// auth.
-	ErrorTpl     string
+	ErrorTpl string
 	// Debug will print some debug logs.
-	Debug        bool
+	Debug bool
 	// CertFile is the path to the SSL certificate file. If this and KeyFile are provided, the
 	// server will be run with SSL.
-	CertFile     string
+	CertFile string
 	// KeyFile is the path to the SSL certificate key file. If this and CertFile are provided, the
 	// server will be run with SSL.
-	KeyFile      string
+	KeyFile string
+	//ButtonTpl is the path to the Slack button template
+	ButtonTpl string
+	//Scopes is the list of the allowed scopes
+	Scopes []string
 }
 
 // New creates a new slackauth service.
@@ -99,7 +102,12 @@ func New(opts Options) (Service, error) {
 		return nil, err
 	}
 
-	slackAuthService := &slackAuth{
+	buttonTpl, err := readTemplate(opts.ButtonTpl)
+	if err != nil {
+		return nil, err
+	}
+
+	return &slackAuth{
 		clientID:     opts.ClientID,
 		clientSecret: opts.ClientSecret,
 		addr:         opts.Addr,
@@ -110,11 +118,9 @@ func New(opts Options) (Service, error) {
 		keyFile:      opts.KeyFile,
 		auths:        make(chan *slack.OAuthResponse, 1),
 		api:          &slackAPIWrapper{},
-		httpHandlers: make(map[string]HTTPHandler),
-	}
-	slackAuthService.httpHandlers["/auth"] = slackAuthService.getAuthorizationHandler()
-
-	return slackAuthService, nil
+		buttonTpl:    buttonTpl,
+		scopes:       strings.Join(opts.Scopes, ","),
+	}, nil
 }
 
 func (s *slackAuth) Run() error {
@@ -153,22 +159,17 @@ func (s *slackAuth) OnAuth(fn func(*slack.OAuthResponse)) {
 	s.callback = fn
 }
 
-func (s *slackAuth) ConfigureSlackButton(options *SlackButtonOptions) error {
-	options.ClientID = s.clientID
-	handler, err := GetButtonHandler(options)
-	if err != nil {
-		return err
-	}
-	s.httpHandlers["/"] = handler
-	return nil
-}
-
 func (s *slackAuth) runServer() error {
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.buttonHandler)
+	mux.HandleFunc("/auth", s.authorizationHandler)
+
 	srv := &http.Server{
 		ReadTimeout:  1 * time.Second,
 		WriteTimeout: 3 * time.Second,
 		Addr:         s.addr,
-		Handler:      s,
+		Handler:      mux,
 	}
 
 	if s.certFile != "" && s.keyFile != "" {
@@ -177,42 +178,24 @@ func (s *slackAuth) runServer() error {
 	return srv.ListenAndServe()
 }
 
-func (s *slackAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	path := getPath(r)
-	if isIgnoredUri(path) {
+func (s *slackAuth) authorizationHandler(w http.ResponseWriter, r *http.Request) {
+	code := r.FormValue("code")
+	resp, err := s.api.GetOAuthResponse(s.clientID, s.clientSecret, code, s.debug)
+	if err != nil {
+		w.WriteHeader(409)
+		log15.Error("error getting oauth response", "err", err.Error())
+		if err := s.errorTpl.Execute(w, resp); err != nil {
+			log15.Error("error displaying error tpl", "err", err.Error())
+		}
 		return
 	}
 
-	log15.Info("requested: " + path)
-	handler, ok := s.httpHandlers[path]
-	if !ok {
-		w.WriteHeader(404)
-		log15.Error("no handler found", "err", path)
-		return
+	if err := s.successTpl.Execute(w, resp); err != nil {
+		log15.Error("error displaying success tpl", "err", err.Error())
 	}
-	handler(w, r)
-}
 
-func (s *slackAuth) getAuthorizationHandler() func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		code := r.FormValue("code")
-		resp, err := s.api.GetOAuthResponse(s.clientID, s.clientSecret, code, s.debug)
-		if err != nil {
-			w.WriteHeader(409)
-			log15.Error("error getting oauth response", "err", err.Error())
-			if err := s.errorTpl.Execute(w, resp); err != nil {
-				log15.Error("error displaying error tpl", "err", err.Error())
-			}
-			return
-		}
-
-		if err := s.successTpl.Execute(w, resp); err != nil {
-			log15.Error("error displaying success tpl", "err", err.Error())
-		}
-
-		log15.Debug("successful authorization", "team", resp.TeamName, "team id", resp.TeamID)
-		s.auths <- resp
-	}
+	log15.Debug("successful authorization", "team", resp.TeamName, "team id", resp.TeamID)
+	s.auths <- resp
 }
 
 func readTemplate(file string) (*template.Template, error) {
@@ -222,12 +205,4 @@ func readTemplate(file string) (*template.Template, error) {
 	}
 
 	return template.New("").Parse(string(bytes))
-}
-
-func getPath(r *http.Request) string {
-	return r.URL.Path
-}
-
-func isIgnoredUri(uri string) bool {
-	return uri == "/favicon.ico"
 }
