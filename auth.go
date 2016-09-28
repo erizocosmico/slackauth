@@ -124,25 +124,29 @@ func New(opts Options) (Service, error) {
 		api:          &slackAPIWrapper{},
 	}
 
-	return slackAuthService.configureButton(opts.ButtonTpl, opts.Scopes)
+	err = slackAuthService.configureButton(opts.ButtonTpl, opts.Scopes)
+	if err != nil {
+		return nil, err
+	}
+	return slackAuthService, nil
 }
 
-func (s *slackAuth) configureButton(buttonTpl string, scopes []string) (*slackAuth, error) {
+func (s *slackAuth) configureButton(buttonTpl string, scopes []string) error {
 	if len(buttonTpl) > 0 {
 		buttonTpl, err := readTemplate(buttonTpl)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		if len(scopes) == 0 {
-			return nil, errors.New("At least one scope needed")
+			return errors.New("At least one scope needed")
 		}
 
 		s.scopes = strings.Join(scopes, ",")
 		s.buttonTpl = buttonTpl
 	}
 
-	return s, nil
+	return nil
 }
 
 func (s *slackAuth) Run() error {
