@@ -6,8 +6,10 @@ import (
 	"html/template"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +34,15 @@ const (
 	<p>All went ok!</p>`
 	tplError = `<h1>:(</h1>
 	<p>Something went wrong!</p>`
+	tplSlackButton = `ADD ME:
+		<a href="https://slack.com/oauth/authorize?scope={{.Scopes}}&client_id={{.ClientId}}">
+			SLACK BUTTON
+		</a>`
+	slackButtonRegExp = "<a[^>]+href=\"https://slack.com/oauth/authorize\\?" +
+		"scope=([^&\"]+)[^\"]*&client_id=([^&\"]+)[^\"]*\"[^>]*>[\\s\\S]*</a>"
 )
+
+var slackButtonMatcher = regexp.MustCompile(slackButtonRegExp)
 
 func TestNew(t *testing.T) {
 	assert.Nil(t, ioutil.WriteFile("valid.txt", []byte("foo"), 0777))
@@ -61,6 +71,15 @@ func TestNew(t *testing.T) {
 			ButtonTpl:    "invalid.txt",
 			Scopes:       []string{},
 		}, true},
+		{Options{
+			Addr:         ":8080",
+			ClientID:     "foo",
+			ClientSecret: "bar",
+			SuccessTpl:   "valid.txt",
+			ErrorTpl:     "valid.txt",
+			ButtonTpl:    "",
+			Scopes:       []string{},
+		}, false},
 		{Options{
 			Addr:         ":8080",
 			ClientID:     "foo",
@@ -124,19 +143,19 @@ func TestSlackAuth(t *testing.T) {
 	<-time.After(50 * time.Millisecond)
 
 	// This will not trigger an OnAuth event
-	testRequest(t, getUrlForAuth("fooo"), tplSuccess)
-	testRequest(t, getUrlForAuth("invalid"), tplError)
+	testRequest(t, getURLForAuth("fooo"), tplSuccess)
+	testRequest(t, getURLForAuth("invalid"), tplError)
 
 	var auths int
 	auth.OnAuth(func(auth *slack.OAuthResponse) {
 		auths++
 	})
-	testRequest(t, getUrlForAuth("fooo"), tplSuccess)
-	testRequest(t, getUrlForAuth("bar"), tplSuccess)
+	testRequest(t, getURLForAuth("fooo"), tplSuccess)
+	testRequest(t, getURLForAuth("bar"), tplSuccess)
 	assert.Equal(t, 2, auths)
 }
 
-func getUrlForAuth(code string) string {
+func getURLForAuth(code string) string {
 	return fmt.Sprintf("http://127.0.0.1:8989/auth?code=%s", code)
 }
 
@@ -163,12 +182,7 @@ func TestSlackButton(t *testing.T) {
 		ClientId: "client-id",
 	}
 
-	buttonTplString := `ADD ME:
-		<a href="https://slack.com/oauth/authorize?scope={{.Scopes}}&client_id={{.ClientId}}">
-			SLACK BUTTON
-		</a>`
-
-	assert.Nil(t, ioutil.WriteFile("valid.txt", []byte(buttonTplString), 0777))
+	assert.Nil(t, ioutil.WriteFile("valid.txt", []byte(tplSlackButton), 0777))
 
 	auth, err := New(Options{
 		Addr:         ":8080",
@@ -184,8 +198,13 @@ func TestSlackButton(t *testing.T) {
 	go auth.Run()
 	<-time.After(5 * time.Millisecond)
 
-	matcher, _ := regexp.Compile("<a[^>]+href=\"https://slack.com/oauth/authorize\\?scope=[^&\"]+&client_id=[^&\"]+\"[^>]*>[\\s\\S]*</a>")
 	servedButtonCode := getBody(t, "http://127.0.0.1:8080/")
-	found := matcher.Find(servedButtonCode)
-	assert.NotNil(t, found)
+	matches := slackButtonMatcher.FindStringSubmatch(string(servedButtonCode))
+	assert.NotNil(t, matches)
+	assert.Equal(t, 3, len(matches))
+	receibedScopes, _ := url.QueryUnescape(matches[1])
+	assert.Equal(t, strings.Join(buttonOpts.Scopes, ","), receibedScopes)
+	assert.Equal(t, buttonOpts.ClientId, matches[2])
+
+	assert.Nil(t, os.Remove("valid.txt"))
 }

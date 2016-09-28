@@ -16,6 +16,15 @@ import (
 	log15 "gopkg.in/inconshreveable/log15.v2"
 )
 
+const (
+	// BOT scope grants permission to add the bot bundled by the app
+	BOT = "bot"
+	// WEBHOOK scope  allows requesting permission to post content to the user's Slack team
+	WEBHOOK = "incoming-webhook"
+	// COMMANDS scope allows installing slash commands bundled in the Slack app
+	COMMANDS = "commands"
+)
+
 // Service is a service to authenticate on slack using the "Add to slack" button.
 type Service interface {
 	// SetLogOutput sets the place where logs will be written.
@@ -80,9 +89,9 @@ type Options struct {
 	// KeyFile is the path to the SSL certificate key file. If this and CertFile are provided, the
 	// server will be run with SSL.
 	KeyFile string
-	//ButtonTpl is the path to the Slack button template
+	// ButtonTpl is the path to the Slack button template
 	ButtonTpl string
-	//Scopes is the list of the allowed scopes
+	// Scopes is the list of the allowed scopes
 	Scopes []string
 }
 
@@ -102,17 +111,7 @@ func New(opts Options) (Service, error) {
 		return nil, err
 	}
 
-	buttonTpl, err := readTemplate(opts.ButtonTpl)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(opts.Scopes) == 0 {
-		return nil, errors.New("At least one scope needed")
-	}
-	scopes := strings.Join(opts.Scopes, ",")
-
-	return &slackAuth{
+	slackAuthService := &slackAuth{
 		clientID:     opts.ClientID,
 		clientSecret: opts.ClientSecret,
 		addr:         opts.Addr,
@@ -123,9 +122,27 @@ func New(opts Options) (Service, error) {
 		keyFile:      opts.KeyFile,
 		auths:        make(chan *slack.OAuthResponse, 1),
 		api:          &slackAPIWrapper{},
-		buttonTpl:    buttonTpl,
-		scopes:       scopes,
-	}, nil
+	}
+
+	return slackAuthService.configureButton(opts.ButtonTpl, opts.Scopes)
+}
+
+func (s *slackAuth) configureButton(buttonTpl string, scopes []string) (*slackAuth, error) {
+	if len(buttonTpl) > 0 {
+		buttonTpl, err := readTemplate(buttonTpl)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(scopes) == 0 {
+			return nil, errors.New("At least one scope needed")
+		}
+
+		s.scopes = strings.Join(scopes, ",")
+		s.buttonTpl = buttonTpl
+	}
+
+	return s, nil
 }
 
 func (s *slackAuth) Run() error {
@@ -165,7 +182,6 @@ func (s *slackAuth) OnAuth(fn func(*slack.OAuthResponse)) {
 }
 
 func (s *slackAuth) runServer() error {
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.buttonHandler)
 	mux.HandleFunc("/auth", s.authorizationHandler)
@@ -180,6 +196,7 @@ func (s *slackAuth) runServer() error {
 	if s.certFile != "" && s.keyFile != "" {
 		return srv.ListenAndServeTLS(s.certFile, s.keyFile)
 	}
+
 	return srv.ListenAndServe()
 }
 
@@ -187,20 +204,34 @@ func (s *slackAuth) authorizationHandler(w http.ResponseWriter, r *http.Request)
 	code := r.FormValue("code")
 	resp, err := s.api.GetOAuthResponse(s.clientID, s.clientSecret, code, s.debug)
 	if err != nil {
-		w.WriteHeader(409)
+		w.WriteHeader(http.StatusUnauthorized)
 		log15.Error("error getting oauth response", "err", err.Error())
 		if err := s.errorTpl.Execute(w, resp); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			log15.Error("error displaying error tpl", "err", err.Error())
 		}
+
 		return
 	}
 
 	if err := s.successTpl.Execute(w, resp); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		log15.Error("error displaying success tpl", "err", err.Error())
 	}
 
 	log15.Debug("successful authorization", "team", resp.TeamName, "team id", resp.TeamID)
 	s.auths <- resp
+}
+
+func (s *slackAuth) buttonHandler(w http.ResponseWriter, r *http.Request) {
+	templateScope := map[string]string{
+		"Scopes":   s.scopes,
+		"ClientId": s.clientID,
+	}
+	if err := s.buttonTpl.Execute(w, templateScope); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log15.Error("error displaying button tpl", "err", err.Error())
+	}
 }
 
 func readTemplate(file string) (*template.Template, error) {
