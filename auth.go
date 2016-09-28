@@ -8,11 +8,21 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nlopes/slack"
 
 	log15 "gopkg.in/inconshreveable/log15.v2"
+)
+
+const (
+	// BOT scope grants permission to add the bot bundled by the app
+	BOT = "bot"
+	// WEBHOOK scope  allows requesting permission to post content to the user's Slack team
+	WEBHOOK = "incoming-webhook"
+	// COMMANDS scope allows installing slash commands bundled in the Slack app
+	COMMANDS = "commands"
 )
 
 // Service is a service to authenticate on slack using the "Add to slack" button.
@@ -53,30 +63,36 @@ type slackAuth struct {
 	auths        chan *slack.OAuthResponse
 	callback     func(*slack.OAuthResponse)
 	api          slackAPI
+	buttonTpl    *template.Template
+	scopes       string
 }
 
 // Options has all the configurable parameters for slack authenticator.
 type Options struct {
 	// Addr is the address where the service will run. e.g: :8080, 0.0.0.0:8989, etc.
-	Addr         string
+	Addr string
 	// ClientID is the slack client ID provided to you in your app credentials.
-	ClientID     string
+	ClientID string
 	// ClientSecret is the slack client secret provided to you in your app credentials.
 	ClientSecret string
 	// SuccessTpl is the path to the template that will be displayed when there is a successful
 	// auth.
-	SuccessTpl   string
+	SuccessTpl string
 	// ErrorTpl is the path to the template that will be displayed when there is an invalid
 	// auth.
-	ErrorTpl     string
+	ErrorTpl string
 	// Debug will print some debug logs.
-	Debug        bool
+	Debug bool
 	// CertFile is the path to the SSL certificate file. If this and KeyFile are provided, the
 	// server will be run with SSL.
-	CertFile     string
+	CertFile string
 	// KeyFile is the path to the SSL certificate key file. If this and CertFile are provided, the
 	// server will be run with SSL.
-	KeyFile      string
+	KeyFile string
+	// ButtonTpl is the path to the Slack button template
+	ButtonTpl string
+	// Scopes is the list of the allowed scopes
+	Scopes []string
 }
 
 // New creates a new slackauth service.
@@ -95,7 +111,7 @@ func New(opts Options) (Service, error) {
 		return nil, err
 	}
 
-	return &slackAuth{
+	slackAuthService := &slackAuth{
 		clientID:     opts.ClientID,
 		clientSecret: opts.ClientSecret,
 		addr:         opts.Addr,
@@ -106,7 +122,31 @@ func New(opts Options) (Service, error) {
 		keyFile:      opts.KeyFile,
 		auths:        make(chan *slack.OAuthResponse, 1),
 		api:          &slackAPIWrapper{},
-	}, nil
+	}
+
+	err = slackAuthService.configureButton(opts.ButtonTpl, opts.Scopes)
+	if err != nil {
+		return nil, err
+	}
+	return slackAuthService, nil
+}
+
+func (s *slackAuth) configureButton(buttonTpl string, scopes []string) error {
+	if len(buttonTpl) > 0 {
+		buttonTpl, err := readTemplate(buttonTpl)
+		if err != nil {
+			return err
+		}
+
+		if len(scopes) == 0 {
+			return errors.New("At least one scope needed")
+		}
+
+		s.scopes = strings.Join(scopes, ",")
+		s.buttonTpl = buttonTpl
+	}
+
+	return nil
 }
 
 func (s *slackAuth) Run() error {
@@ -146,36 +186,56 @@ func (s *slackAuth) OnAuth(fn func(*slack.OAuthResponse)) {
 }
 
 func (s *slackAuth) runServer() error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.buttonHandler)
+	mux.HandleFunc("/auth", s.authorizationHandler)
+
 	srv := &http.Server{
 		ReadTimeout:  1 * time.Second,
 		WriteTimeout: 3 * time.Second,
 		Addr:         s.addr,
-		Handler:      s,
+		Handler:      mux,
 	}
 
 	if s.certFile != "" && s.keyFile != "" {
 		return srv.ListenAndServeTLS(s.certFile, s.keyFile)
 	}
+
 	return srv.ListenAndServe()
 }
 
-func (s *slackAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *slackAuth) authorizationHandler(w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	resp, err := s.api.GetOAuthResponse(s.clientID, s.clientSecret, code, s.debug)
 	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
 		log15.Error("error getting oauth response", "err", err.Error())
 		if err := s.errorTpl.Execute(w, resp); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			log15.Error("error displaying error tpl", "err", err.Error())
 		}
+
 		return
 	}
 
 	if err := s.successTpl.Execute(w, resp); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		log15.Error("error displaying success tpl", "err", err.Error())
 	}
-	
+
 	log15.Debug("successful authorization", "team", resp.TeamName, "team id", resp.TeamID)
 	s.auths <- resp
+}
+
+func (s *slackAuth) buttonHandler(w http.ResponseWriter, r *http.Request) {
+	templateScope := map[string]string{
+		"Scopes":   s.scopes,
+		"ClientId": s.clientID,
+	}
+	if err := s.buttonTpl.Execute(w, templateScope); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log15.Error("error displaying button tpl", "err", err.Error())
+	}
 }
 
 func readTemplate(file string) (*template.Template, error) {
